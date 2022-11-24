@@ -1,0 +1,975 @@
+#!/usr/bin/env node
+
+const stx_common = require("@stacks/common");
+const stx_net = require("@stacks/network");
+
+// disable debug logging
+let stacksConfig = stx_common.config;
+stacksConfig.logLevel = "none";
+
+const stx = require("@stacks/transactions");
+const process = require('node:process');
+const fs = require('node:fs');
+const walletSdk = require('@stacks/wallet-sdk');
+
+let DEBUG = true;
+const DEFAULT_NODE = "http://seed-0.mainnet.stacks.co:20443"
+
+function debug(msg) {
+  if (DEBUG) {
+    console.error(msg);
+  }
+}
+
+function getTxVersion(mainnet) {
+  if (mainnet) {
+    return stx_common.TransactionVersion.Mainnet;
+  }
+  else {
+    return stx_common.TransactionVersion.Testnet;
+  }
+}
+
+function getSeedPhrase(phrase) {
+  if (phrase === '-') {
+    const phrase = fs.readFileSync(0, { encoding: 'utf8' });
+    return phrase.trim();
+  }
+  else {
+    return phrase;
+  }
+}
+
+function getContractSrc(srcPath) {
+  const code = fs.readFileSync(srcPath, { encoding: 'utf8' });
+  return code;
+}
+
+function getNetwork(mainnet, node) {
+  if (mainnet) {
+    return new stx_net.StacksMainnet({ url: node });
+  }
+  else {
+    return new stx_net.StacksTestnet({ url: node });
+  }
+}
+
+// argv: string[]: list of arguments to parse
+// opts: string: getopt(3)-style short options
+// longOpts: object: long option names keyed to short option characters in opts
+function getCLIOpts(argv, opts, longOpts) {
+  const optsTable = {};
+  const remainingArgv = [];
+  const argvBuff = argv.slice(0);
+
+  for (let i = 0; i < opts.length; i++) {
+    if (opts[i] == ':') {
+      continue;
+    }
+    if (i + 1 < opts.length && opts[i + 1] === ':') {
+      optsTable[opts[i]] = null;
+    } else {
+      optsTable[opts[i]] = false;
+    }
+  }
+
+  for (const opt of Object.keys(optsTable)) {
+    for (let i = 0; i < argvBuff.length; i++) {
+      if (argvBuff[i] === null) {
+        break;
+      }
+      if (argvBuff[i] === '--') {
+        break;
+      }
+
+      const argvOpt = `-${opt}`;
+      const longOptName = longOpts[opt] !== undefined ? longOpts[opt] : '';
+      const longOpt = `--${longOpts[longOptName]}`;
+      if (argvOpt === argvBuff[i] || longOpt === argvBuff[i]) {
+        if (optsTable[opt] === false) {
+          // boolean switch
+          optsTable[opt] = true;
+          argvBuff[i] = '';
+        } else {
+          // argument
+          optsTable[opt] = argvBuff[i + 1];
+          argvBuff[i] = '';
+          argvBuff[i + 1] = '';
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < argvBuff.length; i++) {
+    if (argvBuff[i].length > 0) {
+      if (argvBuff[i] === '--') {
+        continue;
+      }
+      remainingArgv.push(argvBuff[i]);
+    }
+  }
+
+  optsTable['_'] = remainingArgv;
+  return optsTable;
+}
+
+function usageAccountGet() {
+  console.error(
+    `Usage: ${process.argv[1]} get-account [options] address\n` +
+    `Where \`address\` is a standard or contract principal.\n` +
+    `Values for \'options\' include:\n` +
+    `   -b, --at-block      Stacks chain tip block ID at which to run this function\n` +
+    `   -N, --node          Stacks node URL. Default is ${DEFAULT_NODE}\n` +
+    `\n` +
+    `Outputs the account balance, locked tokens, unlock height, and nonce.\n`
+  );
+  process.exit(1);
+}
+
+function usageSeedPhrase() {
+  console.error(
+    `Usage: ${process.argv[1]} seed-phrase\n` +
+    `\n` +
+    `Outputs a 12-word BIP39 seed phrase\n`
+  );
+  process.exit(1);
+}
+
+function usageGenerateAccount() {
+  console.error(
+    `Usage: ${process.argv[1]} generate-account [options] [index]\n` +
+    `Where \`index\` refers to the nth account created from this seed phrase, starting from 0.\n` +
+    `Values for \'options\' include:\n` +
+    `   -t, --testnet       Use testnet address format\n` +
+    `   -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.\n` +
+    `\n` +
+    `Outputs the account secrets as JSON.\n`
+  );
+  process.exit(1);
+}
+
+function usageTokenTransfer() {
+  console.error(
+    `Usage: ${process.argv[1]} token-transfer [options] recipient amount\n` +
+    `Where:\n` +
+    `   \`recipient\` is a standard or contract principal\n` +
+    `   \`amount\` is the number of uSTX\n` +
+    `\n` +
+    `Values for \'options\' include:\n` +
+    `   -A, --account-index Index of the account to derive from the master key.\n` +
+    `   -N, --node          URL to the node to use to look up the sending account nonce, if needed\n` +
+    `   -a, --anchor-mode   "off-chain" or "on-chain" if required. Defaults to 'Any'.\n` +
+    `   -f, --fee           uSTX transaction fee.\n` +
+    `   -m, --memo          Set the memo field\n` +
+    `   -n, --nonce         Use the given transaction nonce\n` +
+    `   -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.\n` +
+    `   -t, --testnet       Use testnet version bytes\n` +
+    `\n` +
+    `Outputs the serialized transaction as a hex-encoded string.\n`
+  );
+  process.exit(1);
+}
+
+function usageContractPublish() {
+  console.error(
+    `Usage: ${process.argv[1]} contract-publish [options] contract-name contract-src\n` +
+    `Where:\n` +
+    `   \`contract-name\` is the name of the contract\n` +
+    `   \`contract-src\` is the path to the contract code on disk\n` +
+    `\n` +
+    `Values for \'options\' include:\n` +
+    `   -A, --account-index Index of the account to derive from the master key.\n` +
+    `   -N, --node          URL to the node to use to look up the sending account nonce, if needed\n` +
+    `   -a, --anchor-mode   "off-chain" or "on-chain" if required. Defaults to 'Any'.\n` +
+    `   -f, --fee           uSTX transaction fee.\n` +
+    `   -n, --nonce         Use the given transaction nonce\n` +
+    `   -p, --post-conds    Post-conditions. Run \`help post-conditions\` for details.\n` +
+    `   -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.\n` +
+    `   -t, --testnet       Use testnet version bytes\n` +
+    `\n` +
+    `Outputs the serialized transaction as a hex-encoded string.\n`
+  );
+  process.exit(1);
+}
+
+function usageContractCall() {
+  console.error(
+    `Usage: ${process.argv[1]} contract-call [options] contract-id function-name [arg...]\n` +
+    `Where:\n` +
+    `   \`contract-id\` is the fully-qualified address of the contract\n` +
+    `   \`function-name\` is the name of the function to call\n` +
+    `   \`[arg ...]\` is a list of zero or more arguments, as hex-encoded serialized Clarity values\n` +
+    `\n` +
+    `Values for \'options\' include:\n` +
+    `   -A, --account-index Index of the account to derive from the master key.\n` +
+    `   -N, --node          URL to the node to use to look up the sending account nonce, if needed\n` +
+    `   -a, --anchor-mode   "off-chain" or "on-chain" if required. Defaults to 'Any'.\n` +
+    `   -f, --fee           uSTX transaction fee.\n` +
+    `   -n, --nonce         Use the given transaction nonce\n` +
+    `   -p, --post-conds    Post-conditions. Run \`help post-conditions\` for details.\n` +
+    `   -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.\n` +
+    `   -t, --testnet       Use testnet version bytes\n` +
+    `\n` +
+    `Outputs the serialized transaction as a hex-encoded string.\n`
+  );
+  process.exit(1);
+}
+
+function usagePostConditions() {
+  console.error(
+    `Post-conditions help\n` +
+    `\n` +
+    `Post-conditions are encoded as a sequence of words as follows:\n` +
+    `\n` +
+    `     post-condition = mode conditions\n` +
+    `               mode = "allow" | "deny"\n` +
+    `         conditions = type parameters\n` +
+    `               type = "stx" | "ft" | "nft"\n` +
+    `         parameters = stxParameters | ftParameters | nftParameters\n` +
+    `      stxParameters = principal fungibleCode amount\n` +
+    `       ftParameters = principal fungibleCode contractID name amount\n` +
+    `      nftParameters = principal nftCode contractID name value\n` +
+    `          principal = standardPrincipal | contractID\n` +
+    `  standardPrincipal = (a standard STX principal)\n` +
+    `       fungibleCode = "<" | "<=" | "==" | ">=" | ">"\n` +
+    `            nftCode = "sends" | "keeps"\n` +
+    `         contractID = (a fully-qualified STX contract principal)\n` +
+    `               name = (a valid FT or NFT name)\n` +
+    `             amount = (an unsigned integer)\n` +
+    `              value = (a hex-encoded serialized Clarity value)\n` +
+    `\n` +
+    `Examples:\n` +
+    `\n` +
+    `  "Allow-all; \`ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS\` must spend less than or equal to 1 uSTX"\n` +
+    `\n` +
+    `      \`-p "allow stx ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS <= 1\`\n` +
+    `\n` +
+    `  "Allow-all; \`ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS\` must spend greater than or equal to 2 \`stackaroos\` from the\n` +
+    `  from the \`ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS.bar\` contract\n` +
+    `\n` +
+    `      \`-p "allow ft ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS >= ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS.bar stackaroo 2"\`\n` +
+    `\n` +
+    `  "Allow-all; \`ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS\` does not send the NFT value \`none\` from the\n` +
+    `  NFT \`quux\` defined in contract \`ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS.baz\`\n` +
+    `\n` +
+    `      \`-p "allow nft ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS keeps ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS.baz quux 09"\`\n` +
+    `\n` +
+    `Note that post-conditions are concatenative.  For example, you can combine all of the above post-conditions as follows:\n` +
+    `\n` +
+    `      \`-p "allow \\\n` +
+    `           stx ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS <= 1 \\\n` +
+    `           ft ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS >= ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS.bar stackaroo 2 \\\n` +
+    `           nft ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS keeps ST1HMT0X6EDTVFN9ZQR8XCE1NMQFPV64VRQWXV8WS.baz quux 09"\n` +
+    `\n`
+  );
+  process.exit(1);
+}
+
+function usageSubcommands() {
+  console.error(
+    `Usage: ${process.argv[1]} subcommand [options] args...\n` +
+    `Where \`subcommand\` is any of the following:\n` +
+    `\n` +
+    `  Accounts\n` +
+    `     generate-account       Generate a wallet's secrets\n` +
+    `     get-account            Get an account's balance from the node\n` +
+    `     seed-phrase            Generate a wallet seed phrase\n` +
+    `\n` +
+    `  Transactions\n` +
+    `     token-transfer         Generate a token-transfer transaction\n` +
+    `     contract-publish       Generate a contract-publish transaction\n` +
+    `     contract-call          Generate a contract-call transaction\n` +
+    `\n` +
+    `Run '${process.argv[1]} help subcommand' for subcommand-specific instructions.\n` +
+    `Run '${process.argv[1]} help post-conditions' for how to craft post-conditions.` +
+    '\n'
+  );
+  process.exit(1);
+}
+
+function doHelp(subcommand) {
+  if (subcommand === "get-account") {
+    usageAccountGet();
+  }
+  else if (subcommand === "generate-account") {
+    usageGenerateAccount();
+  }
+  else if (subcommand === "seed-phrase") {
+    usageSeedPhrase();
+  }
+  else if (subcommand === "token-transfer") {
+    usageTokenTransfer();
+  }
+  else if (subcommand === "contract-publish") {
+    usageContractPublish();
+  }
+  else if (subcommand === "contract-call") {
+    usageContractCall();
+  }
+  else if (subcommand === "post-conditions") {
+    usagePostConditions();
+  }
+  else {
+    console.error(`Unrecognized subcommand '${subcommand}'`);
+    usageSubcommands();
+  }
+}
+
+// Go get an account.
+// Returns:
+// { balance: bitint, locked: bigint, unlock_height: bigint, nonce: bigint }
+async function getAccount(node, address, tip) {
+  let url = `${node}/v2/accounts/${address}?proof=0`;
+  if (!!tip) {
+    url = `${url}&tip=${tip}`;
+  }
+
+  let res;
+  let data;
+
+  try {
+    res = await fetch(url, {
+      method: 'get',
+    });
+  }
+  catch(error) {
+    console.error(error);
+    return undefined;
+  }
+  
+  if (!res.ok) {
+    console.error(`HTTP ${res.status}: ${await res.text()}`);
+    return undefined;
+  }
+
+  try {
+    data = await res.json();
+  }
+  catch(error) {
+    console.error(error);
+    return undefined;
+  }
+
+  const balance = stx.hexToCV(data.balance).value;
+  const locked = stx.hexToCV(data.locked).value;
+  const nonce = BigInt(data.nonce);
+  const unlock_height = BigInt(data.unlock_height);
+
+  const ret = {
+    balance: balance,
+    locked: locked,
+    unlock_height: unlock_height,
+    nonce: nonce
+  };
+  return ret;
+}
+
+// CLI subcommand for getting an account balance
+async function getAccountCLI(argv) {
+  const opts = getCLIOpts(argv, "N:b:", {
+    "N": "node",
+    "b": "at-block"
+  });
+  
+  let node = opts['N'];
+  if (node === null) {
+    node = DEFAULT_NODE;
+  }
+  const tip = opts['b'];
+  const args = opts['_'];
+  if (args.length !== 1) {
+    usageAccountGet();
+  }
+
+  const address = args[0];
+  const account = await getAccount(node, address, tip);
+  return account;
+}
+
+function parseBigInt(str_arg, err_msg, usage) {
+  if (!!str_arg) {
+    try {
+      int_repr = BigInt(str_arg);
+      return int_repr;
+    }
+    catch(e) {
+      console.error(`Error: ${err_msg}: '${str_arg}'`);
+      usage();
+    }
+  }
+}
+
+// Generate a wallet account from a seed phrase
+async function generateWalletAccount(phrase, account_idx, mainnet) {
+  let wallet = await walletSdk.generateWallet({
+    secretKey: phrase,
+    password: phrase
+  });
+
+  for (let i = 0; i <= account_idx; i++) {
+    wallet = walletSdk.generateNewAccount(wallet);
+  }
+
+  let acct = wallet.accounts[account_idx];
+  acct.stxAddress = walletSdk.getStxAddress({
+    account: acct,
+    transactionVersion: getTxVersion(mainnet),
+  });
+
+  return acct;
+}
+
+// CLI for generating a seed phrase
+function generateSeedPhraseCLI(argv) {
+  const seedPhrase = walletSdk.generateSecretKey();
+  return seedPhrase;
+}
+
+// CLI for printing out an account
+async function generateWalletAccountCLI(argv) {
+  const opts = getCLIOpts(argv, "ts:", {
+    "t": "testnet",
+    "s": "seed-phrase",
+  });
+  
+  const mainnet = !opts['t'];
+  const phrase = getSeedPhrase(opts['s']);
+  const args = opts['_'];
+
+  if (!phrase) {
+    usageGenerateAccount();
+  }
+  let account_index = 0;
+  if (args.length > 0) {
+    account_index = parseBigInt(args[0], "Invalid account index", usageGenerateAccount);
+  }
+  
+  const accountInfo = await generateWalletAccount(phrase, account_index, mainnet);
+  return accountInfo;
+}
+
+// Helper for decoding a fungible post-condition
+function decodeFungiblePostCondition(pc_code) {
+  if (pc_code === '==') {
+    return stx.FungibleConditionCode.Equal;
+  }
+  if (pc_code === '>') {
+    return stx.FungibleConditionCode.GreaterEqual;
+  }
+  if (pc_code === '>=') {
+    return stx.FungibleConditionCode.Greater;
+  }
+  if (pc_code === '<') {
+    return stx.FungibleConditionCode.Less;
+  }
+  if (pc_code === '<=') {
+    return stx.FungibleConditionCode.LessEqual;
+  }
+  return null;
+}
+
+// Helper to decode a principal to either an address or an address and a name
+// Returns { pc_addr, pc_name }
+function decodePrincipal(pc_principal) {
+  let pc_addr = null;
+  let pc_name = null;
+  if (pc_principal.indexOf('.') > 0) {
+    const pc_parts = pc_principal.split('.');
+    pc_addr = pc_parts[0];
+    pc_name = pc_parts[1];
+  }
+  else {
+    pc_addr = pc_principal;
+  }
+  const ret = {
+    pc_addr,
+    pc_name
+  };
+  return ret;
+}
+
+// Helper to decode an amount in a post-condition
+function decodePcAmount(pc_amount_str) {
+  // decode amount
+  let pc_amount = null;
+
+  try {
+    pc_amount = BigInt(pc_amount_str);
+  }
+  catch(e) {
+    return null;
+  }
+  return pc_amount;
+}
+
+/// Helper to decode a fungible post-condition
+function decodeFungiblePc(pc_type, pc_principal, pc_code, pc_amount_str, ft_contract_id, ft_name) {
+  if (pc_principal === undefined || pc_code === undefined || pc_amount_str === undefined) {
+    console.error(`Ran out of tokens to parse for '${pc_type}'`);
+    return null;
+  }
+  
+  // decode to either a principal or contract
+  const pc_decoded = decodePrincipal(pc_principal);
+  const pc_addr = pc_decoded.pc_addr;
+  const pc_name = pc_decoded.pc_name;
+
+  // decode comparator
+  const pc_comparator = decodeFungiblePostCondition(pc_code);
+  if (pc_comparator === null) {
+    console.error(`Failed to decode '${pc_type}' post-condition code '${pc_code}'`);
+    return null;
+  }
+
+  // decode amount
+  const pc_amount = decodePcAmount(pc_amount_str);
+  if (pc_amount === null) {
+    console.error(`Failed to decode '${pc_type}' post-condition amount '${pc_amount_str}'`);
+    return null;
+  }
+
+  if (pc_type === 'stx') {
+    if (pc_name !== null) {
+      return stx.makeContractSTXPostCondition(pc_addr, pc_name, pc_comparator, pc_amount);
+    }
+    else {
+      return stx.makeStandardSTXPostCondition(pc_addr, pc_comparator, pc_amount);
+    }
+  }
+  else if (pc_type === 'ft') {
+    if (ft_contract_id === undefined || ft_name === undefined) {
+      console.error(`Ran out of tokens to parse for '${pc_type}'`);
+      return null;
+    }
+    const ft_contract_decoded = decodePrincipal(ft_contract_id);
+    if (ft_contract_decoded === null) {
+      console.error(`Failed to decode fungible token contract address '${ft_principal}'`);
+      return null;
+    }
+    const ft_contract_addr = ft_contract_decoded.pc_addr;
+    const ft_contract_name = ft_contract_decoded.pc_name;
+    if (!ft_contract_name) {
+      console.error(`Did not recieve a contract address for fungible token; got '${ft_contract_id}'`);
+      return null;
+    }
+    const asset_info = stx.createAssetInfo(ft_contract_addr, ft_contract_name, ft_name);
+
+    if (pc_name !== null) {
+      return stx.makeContractFungiblePostCondition(pc_addr, pc_name, pc_comparator, pc_amount, asset_info);
+    }
+    else {
+      return stx.makeStandardFungiblePostCondition(pc_addr, pc_comparator, pc_amount, asset_info);
+    }
+  }
+  else {
+    return null;
+  }
+}
+
+/// Helper to decode a non-fungible post-condition
+function decodeNonFungiblePc(pc_principal, pc_code, nft_principal, nft_name, nft_value) {
+  if (pc_principal === undefined || pc_code === undefined || nft_principal === undefined || nft_name === undefined || nft_value === undefined) {
+    console.error(`Ran out of tokens to parse`);
+    return null;
+  }
+
+  // decode principal 
+  const pc_decoded = decodePrincipal(pc_principal);
+  const pc_addr = pc_decoded.pc_addr;
+  const pc_name = pc_decoded.pc_name;
+
+  let pc_comparator = null;
+
+  // decode code
+  if (pc_code === "sends") {
+    pc_comparator = 0x10;
+  }
+  else if (pc_code === "keeps") {
+    pc_comparator = 0x11;
+  }
+  else {
+    console.error(`Failed to decode non-fungible token condition code '${pc_code}'`);
+    return null;
+  }
+
+  // decode NFT contract
+  const nft_contract_decoded = decodePrincipal(nft_principal);
+  if (nft_contract_decoded === null) {
+    console.error(`Failed to decode non-fungible token contract address '${nft_principal}'`);
+    return null;
+  }
+  const nft_contract_addr = nft_contract_decoded.pc_addr;
+  const nft_contract_name = nft_contract_decoded.pc_name;
+  if (nft_contract_name === null) {
+    console.error(`Failed to decode non-fungible token contract address '${nft_principal}'`);
+    return null;
+  }
+
+  const nft_cv = stx.hexToCV(nft_value);
+  const asset_info = stx.createAssetInfo(nft_contract_addr, nft_contract_name, nft_name);
+  if (pc_name !== null) {
+    return stx.makeContractNonFungiblePostCondition(pc_addr, pc_name, pc_comparator, asset_info, nft_cv)
+  }
+  else {
+    return stx.makeStandardNonFungiblePostCondition(pc_addr, pc_comparator, asset_info, nft_cv);
+  }
+}
+
+// Helper for parsing a string of post-conditions
+function parsePostConditions(post_conditions) {
+  const parts = post_conditions.split(/[ \t]+/);
+  let ps = [];
+
+  const mode_str = parts.shift();
+  let mode = null;
+  if (mode_str === 'allow') {
+    mode = stx.PostConditionMode.Allow;
+  }
+  else if (mode_str === 'deny') {
+    mode = stx.PostConditionMode.Deny;
+  }
+  else {
+    console.error(`Failed to decode post-condition mode '${mode_str}'`);
+    return null;
+  }
+  while (parts.length > 0) {
+    const pc_type = parts.shift();
+    if (pc_type === "stx") {
+      // stx post-condition.
+      const pc_principal = parts.shift();
+      const pc_code = parts.shift();
+      const pc_amount_str = parts.shift();
+      const pc = decodeFungiblePc("stx", pc_principal, pc_code, pc_amount_str);
+      if (pc === null) {
+        console.error(`Failed to decode post-condition for '${pc_type}'`);
+        return null;
+      }
+      ps.push(pc);
+    }
+    else if (pc_type === "ft") {
+      // fungible token post-condition
+      const pc_principal = parts.shift();
+      const pc_code = parts.shift();
+      const ft_principal = parts.shift();
+      const ft_name = parts.shift();
+      const ft_amount_str = parts.shift();
+      const pc = decodeFungiblePc("ft", pc_principal, pc_code, ft_amount_str, ft_principal, ft_name);
+      if (pc === null) {
+        console.error(`Failed to decode post-condition for '${pc_type}'`);
+        return null;
+      }
+      ps.push(pc);
+    }
+    else if (pc_type === "nft") {
+      // non-fungible token post-condition
+      const pc_principal = parts.shift();
+      const pc_code = parts.shift();
+      const nft_principal = parts.shift();
+      const nft_name = parts.shift();
+      const nft_value = parts.shift();
+      const pc = decodeNonFungiblePc(pc_principal, pc_code, nft_principal, nft_name, nft_value);
+      if (pc === null) {
+        console.error(`Failed to decode post-condition for '${pc_type}'`);
+        return null;
+      }
+      ps.push(pc);
+    }
+    else {
+      console.error(`Unrecognized post-condition type '${pc_type}'`);
+      return null;
+    }
+  }
+  const ret = {
+    ps,
+    mode
+  };
+  return ret;
+}
+
+// Consolidated CLI argument parsing for tx-creation
+async function getTxOpts(argv, extra_argstr, extra_argdefs, usage) {
+  let longopts = {
+    "N": "node",
+    "t": "testnet",
+    "n": "nonce",
+    "s": "seed-phrase",
+    "A": "account-index",
+    "a": "anchor-mode",
+    "f": "fee",
+    "p": "post-conds"
+  };
+  Object.assign(longopts, extra_argdefs);
+
+  const opts = getCLIOpts(argv, `N:tbn:s:A:f:a:p:${extra_argstr}`, longopts);
+  
+  if (opts['s'] === null) {
+    console.error(`No seed phrase given`);
+    usage();
+  }
+
+  let node = opts['N'];
+  const mainnet = !opts['t'];
+  const nonce_str = opts['n'];
+  const account_str = opts['A'];
+  const fee_str = opts['f'];
+  const phrase = getSeedPhrase(opts['s']);
+  const anchor_mode_str = opts['a'];
+  const post_conditions_str = opts['p'];
+  let anchor_mode = stx.AnchorMode.Any;
+  if (anchor_mode_str !== null) {
+    if (anchor_mode_str === "on-chain") {
+      anchor_mode = stx.AnchorMode.OnChainOnly;
+    }
+    else if (anchor_mode_str === "off-chain") {
+      anchor_mode = stx.AnchorMode.OffChainOnly;
+    }
+    else {
+      console.error(`Unrecognized anchor mode '${anchor_mode_str}'`);
+      usage();
+    }
+  }
+
+  let account_index = parseBigInt(account_str, "Invalid account index", usage);
+  if (account_index === undefined) {
+    account_index = 0;
+  }
+
+  let nonce = parseBigInt(nonce_str, "Invalid nonce", usage);
+  let fee = parseBigInt(fee_str, "Invalid fee", usage);
+  if (fee === undefined) {
+    fee = 0n;
+  }
+
+  let post_conditions = {
+    mode: stx.PostConditionMode.Deny,
+    ps: []
+  };
+
+  if (post_conditions_str !== null) {
+    post_conditions = parsePostConditions(post_conditions_str);
+    if (post_conditions === null) {
+      console.error("Invalid post-conditions");
+      usagePostConditions();
+    }
+  }
+
+  if (node === null) {
+    node = DEFAULT_NODE;
+  }
+  
+  const walletAccount = await generateWalletAccount(phrase, account_index, mainnet);
+  const account = await getAccount(node, walletAccount.stxAddress);
+
+  if (nonce === undefined) {
+    nonce = account.nonce;
+  }
+
+  const ret = {
+    node,
+    mainnet,
+    nonce,
+    fee,
+    account,
+    walletAccount,
+    anchor_mode,
+    post_conditions: post_conditions.ps,
+    post_condition_mode: post_conditions.mode,
+    opts,
+  };
+  return ret;
+}
+
+
+// CLI for creating a token-transfer transaction
+async function tokenTransferCLI(argv) {
+  const opts = await getTxOpts(
+    argv,
+    "m:",
+    {
+      "m": "memo"
+    },
+    usageTokenTransfer
+  );
+ 
+  const innerOpts = opts.opts;
+  const memo = innerOpts['m'];
+
+  const node = opts.node;
+  const mainnet = opts.mainnet;
+  const nonce = opts.nonce;
+  const account = opts.account;
+  const walletAccount = opts.walletAccount;
+  const anchor_mode = opts.anchor_mode;
+  const post_conditions = opts.post_conditions;
+  const post_condition_mode = opts.post_condition_mode;
+  const fee = opts.fee;
+
+  const args = innerOpts['_'];
+  if (args.length !== 2) {
+    usageTokenTransfer();
+  }
+  const recipient = args[0];
+  const amount = parseBigInt(args[1], "Invalid amount", usageTokenTransfer);
+
+  const txOpts = {
+    recipient,
+    amount,
+    senderKey: walletAccount.stxPrivateKey,
+    network: getNetwork(mainnet, node),
+    memo,
+    nonce,
+    fee,
+    anchorMode: anchor_mode,
+    // technically not allowed under the consensus rules, but it's good to have this ability to test it
+    postConditions: post_conditions,
+    postConditionMode: post_condition_mode
+  };
+
+  const transaction = await stx.makeSTXTokenTransfer(txOpts);
+  const transactionHex = transaction.serialize().toString('hex');
+  return transactionHex;
+}
+
+// CLI for creating a contract-publish transaction
+async function contractPublishCLI(argv) {
+  const opts = await getTxOpts(argv, "", {}, usageContractPublish);
+ 
+  const innerOpts = opts.opts;
+
+  const node = opts.node;
+  const mainnet = opts.mainnet;
+  const nonce = opts.nonce;
+  const account = opts.account;
+  const walletAccount = opts.walletAccount;
+  const anchor_mode = opts.anchor_mode;
+  const post_conditions = opts.post_conditions;
+  const post_condition_mode = opts.post_condition_mode;
+  const fee = opts.fee;
+
+  const args = innerOpts['_'];
+  if (args.length !== 2) {
+    usageContractPublish();
+  }
+  const name = args[0];
+  const contract_src = getContractSrc(args[1]);
+
+  const txOpts = {
+    contractName: name,
+    codeBody: contract_src,
+    senderKey: walletAccount.stxPrivateKey,
+    network: getNetwork(mainnet, node),
+    anchorMode: anchor_mode,
+    fee,
+    postConditions: post_conditions,
+    postConditionMode: post_condition_mode
+  };
+  
+  const transaction = await stx.makeContractDeploy(txOpts);
+  const transactionHex = transaction.serialize().toString('hex');
+  return transactionHex;
+}
+
+// CLI for creating a contract-call transaction
+async function contractCallCLI(argv) {
+  const opts = await getTxOpts(argv, "v", { "v": "--validate-abi" }, usageContractCall);
+ 
+  const innerOpts = opts.opts;
+
+  const node = opts.node;
+  const mainnet = opts.mainnet;
+  const nonce = opts.nonce;
+  const account = opts.account;
+  const walletAccount = opts.walletAccount;
+  const anchor_mode = opts.anchor_mode;
+  const post_conditions = opts.post_conditions;
+  const post_condition_mode = opts.post_condition_mode;
+  const fee = opts.fee;
+  const validate_abi = !!innerOpts['v'];
+
+  const args = innerOpts['_'];
+  if (args.length < 2) {
+    usageContractCall();
+  }
+  const contract_id = args[0];
+  const function_name = args[1];
+  const function_args = args
+    .slice(2)
+    .map(function (arg) {
+      return stx.hexToCV(arg);
+    });
+
+  const contract_parts = decodePrincipal(contract_id);
+  const contract_name = contract_parts.pc_name;
+  const contract_addr = contract_parts.pc_addr;
+
+  if (contract_name === null) {
+    usageContractCall();
+  }
+
+  const txOpts = {
+    contractAddress: contract_addr,
+    contractName: contract_name,
+    functionName: function_name,
+    functionArgs: function_args,
+    senderKey: walletAccount.stxPrivateKey,
+    network: getNetwork(mainnet, node),
+    anchorMode: anchor_mode,
+    fee,
+    postConditions: post_conditions,
+    postConditionMode: post_condition_mode,
+    validateWithAbi: validate_abi
+  };
+  
+  const transaction = await stx.makeContractCall(txOpts);
+  const transactionHex = transaction.serialize().toString('hex');
+  return transactionHex;
+}
+
+function printOrExit(res) {
+  if (res !== undefined) {
+    console.log(JSON.stringify(res, (key, value) =>
+      typeof value === 'bigint' ? value.toString() : value
+    ));
+  }
+  else {
+    process.exit(1);
+  }
+}
+
+async function main() {
+  const argv = process.argv.slice(1);
+  const subcommand = argv[1];
+  if (subcommand === "get-account") {
+    const res = await getAccountCLI(argv.slice(2));
+    printOrExit(res);
+  }
+  else if (subcommand === "seed-phrase") {
+    const res = generateSeedPhraseCLI(argv.slice(2));
+    printOrExit(res);
+  }
+  else if (subcommand === "generate-account") {
+    const res = await generateWalletAccountCLI(argv.slice(2));
+    printOrExit(res);
+  }
+  else if (subcommand === "token-transfer") {
+    const res = await tokenTransferCLI(argv.slice(2));
+    printOrExit(res);
+  }
+  else if (subcommand === "contract-publish") {
+    const res = await contractPublishCLI(argv.slice(2));
+    printOrExit(res);
+  }
+  else if (subcommand === "contract-call") {
+    const res = await contractCallCLI(argv.slice(2));
+    printOrExit(res);
+  }
+  else if (subcommand === "help") {
+    doHelp(argv[2]);
+  }
+  else {
+    usageSubcommands();
+  }
+}
+
+main()
+
