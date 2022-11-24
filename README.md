@@ -92,7 +92,7 @@ $ ./wallet-cli seed-phrase
 ## Sending STX tokens
 
 ```
-./wallet-cli help token-transfer
+$ ./wallet-cli help token-transfer
 Usage: wallet-cli token-transfer [options] recipient amount
 Where:
    `recipient` is a standard or contract principal
