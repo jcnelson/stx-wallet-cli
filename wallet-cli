@@ -160,6 +160,7 @@ function usageTokenTransfer() {
     `   -N, --node          URL to the node to use to look up the sending account nonce, if needed\n` +
     `   -a, --anchor-mode   "off-chain" or "on-chain" if required. Defaults to 'Any'.\n` +
     `   -f, --fee           uSTX transaction fee.\n` +
+    `   -k, --private-key   Bare private key to use, if -s is not given.\n` +
     `   -m, --memo          Set the memo field\n` +
     `   -n, --nonce         Use the given transaction nonce\n` +
     `   -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.\n` +
@@ -182,6 +183,7 @@ function usageContractPublish() {
     `   -N, --node          URL to the node to use to look up the sending account nonce, if needed\n` +
     `   -a, --anchor-mode   "off-chain" or "on-chain" if required. Defaults to 'Any'.\n` +
     `   -f, --fee           uSTX transaction fee.\n` +
+    `   -k, --private-key   Bare private key to use, if -s is not given.\n` +
     `   -n, --nonce         Use the given transaction nonce\n` +
     `   -p, --post-conds    Post-conditions. Run \`help post-conditions\` for details.\n` +
     `   -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.\n` +
@@ -205,6 +207,7 @@ function usageContractCall() {
     `   -N, --node          URL to the node to use to look up the sending account nonce, if needed\n` +
     `   -a, --anchor-mode   "off-chain" or "on-chain" if required. Defaults to 'Any'.\n` +
     `   -f, --fee           uSTX transaction fee.\n` +
+    `   -k, --private-key   Bare private key to use, if -s is not given.\n` +
     `   -n, --nonce         Use the given transaction nonce\n` +
     `   -p, --post-conds    Post-conditions. Run \`help post-conditions\` for details.\n` +
     `   -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.\n` +
@@ -417,6 +420,22 @@ async function generateWalletAccount(phrase, account_idx, mainnet) {
   });
 
   return acct;
+}
+
+// Generate a wallet account from a bare private key
+function generateWalletAccountFromKey(private_key, mainnet) {
+  const account = {
+    stxPrivateKey: private_key,
+    dataPrivateKey: null,
+    salt: null,
+    username: null,
+    profile: null,
+    appsKey: null,
+    index: null,
+  };
+  const stxAddress = walletSdk.getStxAddress({account, transactionVersion: getTxVersion(mainnet)});
+  account.stxAddress = stxAddress;
+  return account;
 }
 
 // CLI for generating a seed phrase
@@ -696,14 +715,15 @@ async function getTxOpts(argv, extra_argstr, extra_argdefs, usage) {
     "A": "account-index",
     "a": "anchor-mode",
     "f": "fee",
-    "p": "post-conds"
+    "p": "post-conds",
+    "k": "private-key",
   };
   Object.assign(longopts, extra_argdefs);
 
-  const opts = getCLIOpts(argv, `N:tbn:s:A:f:a:p:${extra_argstr}`, longopts);
+  const opts = getCLIOpts(argv, `N:tbn:s:A:f:a:p:k:${extra_argstr}`, longopts);
   
-  if (opts['s'] === null) {
-    console.error(`No seed phrase given`);
+  if (opts['s'] === null && opts['k'] === null) {
+    console.error(`No seed phrase or private key given`);
     usage();
   }
 
@@ -715,6 +735,7 @@ async function getTxOpts(argv, extra_argstr, extra_argdefs, usage) {
   const phrase = getSeedPhrase(opts['s']);
   const anchor_mode_str = opts['a'];
   const post_conditions_str = opts['p'];
+  const private_key = opts['k'];
   let anchor_mode = stx.AnchorMode.Any;
   if (anchor_mode_str !== null) {
     if (anchor_mode_str === "on-chain") {
@@ -757,7 +778,14 @@ async function getTxOpts(argv, extra_argstr, extra_argdefs, usage) {
     node = DEFAULT_NODE;
   }
   
-  const walletAccount = await generateWalletAccount(phrase, account_index, mainnet);
+  let walletAccount = null;
+  if (phrase) {
+    walletAccount = await generateWalletAccount(phrase, account_index, mainnet);
+  }
+  else if (private_key) {
+    walletAccount = generateWalletAccountFromKey(private_key, mainnet);
+  }
+
   const account = await getAccount(node, walletAccount.stxAddress);
 
   if (nonce === undefined) {
