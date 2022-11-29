@@ -103,6 +103,7 @@ Values for 'options' include:
    -N, --node          URL to the node to use to look up the sending account nonce, if needed
    -a, --anchor-mode   "off-chain" or "on-chain" if required. Defaults to 'Any'.
    -f, --fee           uSTX transaction fee.
+   -k, --private-key   Bare private key to use, if -s is not given.
    -m, --memo          Set the memo field
    -n, --nonce         Use the given transaction nonce
    -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.
@@ -134,6 +135,7 @@ Values for 'options' include:
    -N, --node          URL to the node to use to look up the sending account nonce, if needed
    -a, --anchor-mode   "off-chain" or "on-chain" if required. Defaults to 'Any'.
    -f, --fee           uSTX transaction fee.
+   -k, --private-key   Bare private key to use, if -s is not given.
    -n, --nonce         Use the given transaction nonce
    -p, --post-condition
    -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.
@@ -170,6 +172,7 @@ Values for 'options' include:
    -N, --node          URL to the node to use to look up the sending account nonce, if needed
    -a, --anchor-mode   "off-chain" or "on-chain" if required. Defaults to 'Any'.
    -f, --fee           uSTX transaction fee.
+   -k, --private-key   Bare private key to use, if -s is not given.
    -n, --nonce         Use the given transaction nonce
    -p, --post-conds    Post-conditions. Run `help post-conditions` for details.
    -s, --seed-phrase   12-word master secret. If '-' is passed, it will be read from stdin.
