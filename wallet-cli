@@ -854,7 +854,7 @@ async function tokenTransferCLI(argv) {
   };
 
   const transaction = await stx.makeSTXTokenTransfer(txOpts);
-  const transactionHex = transaction.serialize().toString('hex');
+  const transactionHex = stx_common.bytesToHex(transaction.serialize());
   return transactionHex;
 }
 
@@ -893,7 +893,7 @@ async function contractPublishCLI(argv) {
   };
   
   const transaction = await stx.makeContractDeploy(txOpts);
-  const transactionHex = transaction.serialize().toString('hex');
+  const transactionHex = stx_common.bytesToHex(transaction.serialize());
   return transactionHex;
 }
 
@@ -949,7 +949,7 @@ async function contractCallCLI(argv) {
   };
   
   const transaction = await stx.makeContractCall(txOpts);
-  const transactionHex = transaction.serialize().toString('hex');
+  const transactionHex = stx_common.bytesToHex(transaction.serialize());
   return transactionHex;
 }
 
